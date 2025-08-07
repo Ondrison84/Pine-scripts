@@ -1,0 +1,122 @@
+//@version=6
+// Michychy accumulation/breakout strategy (modified)
+//
+// Tato verze modifikuje logiku vstupu podle přání uživatele:
+// - Většina z pěti předchozích svíček musí být klesající (pro long) nebo rostoucí (pro short).
+// - Vstupní svíčka musí mít objem větší než průměr objemů pěti předchozích svíček.
+// - Vstupní svíčka musí být větší (range high-low) než průměr pěti předchozích svíček.
+// Ostatní parametry (Keltnerův kanál, break‑even, stop‑loss) zůstávají zachovány.
+
+strategy("Michychy Accumulation Break Strategy – Majority/Volume filter", overlay=true, margin_long=100, margin_short=100, default_qty_type=strategy.percent_of_equity, default_qty_value=10)
+
+// === Inputs ===
+kcLength    = input.int(defval=20,  title="Keltner Channel Length", minval=1)
+kcMult      = input.float(defval=3.0, title="Keltner Multiplier", minval=0.1, step=0.1)
+rangeFactor = input.float(defval=1.0, title="Range Factor vs Avg (>=)", minval=0.1, step=0.1)
+
+// === Keltner Channels ===
+midKC   = ta.ema(close, kcLength)
+atrKC   = ta.atr(kcLength)
+upperKC = midKC + kcMult * atrKC
+lowerKC = midKC - kcMult * atrKC
+
+// === Helper calculations ===
+bullCandle      = close > open
+bearCandle      = close < open
+currentRange    = high - low
+
+// Lookback period
+var int lookback = 5
+
+// Count bearish and bullish bars in previous 5 bars
+bearCount = (close[1] < open[1] ? 1 : 0) + (close[2] < open[2] ? 1 : 0) + (close[3] < open[3] ? 1 : 0) + (close[4] < open[4] ? 1 : 0) + (close[5] < open[5] ? 1 : 0)
+bullCount = (close[1] > open[1] ? 1 : 0) + (close[2] > open[2] ? 1 : 0) + (close[3] > open[3] ? 1 : 0) + (close[4] > open[4] ? 1 : 0) + (close[5] > open[5] ? 1 : 0)
+majorityThreshold = math.floor(lookback / 2) + 1
+bearMajority = bearCount >= majorityThreshold
+bullMajority = bullCount >= majorityThreshold
+
+// Average volume and range of previous 5 bars (offset by 1 bar)
+avgVol   = ta.sma(volume, lookback)[1]
+avgRange = ta.sma(currentRange, lookback)[1]
+
+rangeCondLong  = currentRange >= rangeFactor * avgRange
+rangeCondShort = currentRange >= rangeFactor * avgRange
+volCondLong    = volume >= avgVol
+volCondShort   = volume >= avgVol
+
+closeAbovePrevH = close > high[1]
+closeBelowPrevL = close < low[1]
+
+kcCondLong  = close <= upperKC
+kcCondShort = close >= lowerKC
+
+// === Entry Conditions ===
+longCondition  = bullCandle and closeAbovePrevH and bearMajority and volCondLong and rangeCondLong and kcCondLong
+shortCondition = bearCandle and closeBelowPrevL and bullMajority and volCondShort and rangeCondShort and kcCondShort
+
+// === Persistent variables for SL/BE ===
+var float long_stop        = na
+var float short_stop       = na
+var float targetLong       = na
+var float targetShort      = na
+var float longEntryPrice   = na
+var float shortEntryPrice  = na
+var bool  beLong           = false
+var bool  beShort          = false
+
+pip   = syminfo.mintick
+slOff = 5 * pip
+beOff = 2 * pip
+
+// === Long Entry ===
+if (longCondition)
+    float baseLow       = low < low[1] ? low : low[1]
+    long_stop        := baseLow - slOff
+    longEntryPrice   := close
+    float risk       = longEntryPrice - long_stop
+    targetLong       := longEntryPrice + risk
+    beLong           := false
+    strategy.entry("Long", strategy.long)
+    strategy.exit("Long_SL", from_entry="Long", stop=long_stop)
+
+// === Short Entry ===
+if (shortCondition)
+    float baseHigh      = high > high[1] ? high : high[1]
+    short_stop        := baseHigh + slOff
+    shortEntryPrice   := close
+    float risk        = short_stop - shortEntryPrice
+    targetShort       := shortEntryPrice - risk
+    beShort           := false
+    strategy.entry("Short", strategy.short)
+    strategy.exit("Short_SL", from_entry="Short", stop=short_stop)
+
+// === Break‑even and exit logic ===
+if (strategy.position_size > 0)
+    if (not beLong and not na(targetLong) and high >= targetLong)
+        long_stop := longEntryPrice + beOff
+        beLong    := true
+    bool exitLongCandle = close < open[1]
+    if (exitLongCandle)
+        strategy.close("Long", comment="Bearish reversal exit")
+    if (not na(long_stop))
+        strategy.exit("Long_SL", from_entry="Long", stop=long_stop)
+
+if (strategy.position_size < 0)
+    if (not beShort and not na(targetShort) and low <= targetShort)
+        short_stop := shortEntryPrice - beOff
+        beShort    := true
+    bool exitShortCandle = close > open[1]
+    if (exitShortCandle)
+        strategy.close("Short", comment="Bullish reversal exit")
+    if (not na(short_stop))
+        strategy.exit("Short_SL", from_entry="Short", stop=short_stop)
+
+// === Plotting signals ===
+plotshape(longCondition,  title="Long Signal",  location=location.belowbar, color=color.lime, style=shape.triangleup,   size=size.small, text="Long")
+plotshape(shortCondition, title="Short Signal", location=location.abovebar, color=color.red,  style=shape.triangledown, size=size.small, text="Short")
+
+plot(midKC,   color=color.blue,   title="KC Middle")
+plot(upperKC, color=color.orange, title="KC Upper")
+plot(lowerKC, color=color.orange, title="KC Lower")
+
+// End of script
